@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  # 1. ORKESTRERINGSLAGET: n8n
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: evito-n8n
+    restart: unless-stopped
+    ports:
+      - 5678:5678  # n8n UI
+    environment:
+      # Henter variabler fra det sentrale .env
+      - N8N_BASIC_AUTH_USER=${N8N_USER}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD}
+      - WEBHOOK_URL=${WEBHOOK_URL} # Hvis du bytter fra Socket Mode
+      - NODE_ENV=production
+    volumes:
+      - n8n-data:/home/node/.n8n
+    networks:
+      - evito-network
+
+  # 2. AI BACKEND: Risk Service API (Python)
+  risk-service:
+    build:
+      context: .
+      dockerfile: ./services/risk_bot_api/Dockerfile
+    container_name: evito-risk-service
+    restart: unless-stopped
+    ports:
+      - 8080:8080 # For intern kommunikasjon (n8n kaller denne)
+    environment:
+      # DB-koblinger (brukes av Python API)
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      # API Nøkler for Finans / LLM (hvis sentralt lagret)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    networks:
+      - evito-network
+
+  # 3. PERSISTENT DATA: PostgreSQL (Med pgvector-støtte)
+  postgres:
+    image: ankane/pgvector:latest # Image som støtter pgvector out-of-the-box
+    container_name: evito-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./services/shared/init.sql:/docker-entrypoint-initdb.d/init.sql # Skjema setup
+    networks:
+      - evito-network
+
+  # 4. KORTTIDS DATA: Redis
+  redis:
+    image: redis:7-alpine
+    container_name: evito-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    networks:
+      - evito-network
+  # 5. LLAMA SERVICE: Modellen for Finetuning/Ekspertise
+  llama-service:
+    image: vllm/vllm-openai:latest # Bruker vLLM sitt OpenAI-kompatible image
+    container_name: evito-llama-api
+    restart: unless-stopped
+    # Dette er den KRITISKE delen for GPU-tilgang
+    deploy:
+      resources:
+        reservations:
+          devices:
+            # Sjekk din Podman/Docker for riktig GPU-syntaks
+            # Nvidia eksempel:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+volumes:
+  n8n-data:
+  postgres-data:
+  redis-data:
+
+networks:
+  evito-network:
+    driver: bridge

@@ -1,0 +1,382 @@
+import os
+import requests
+from dotenv import load_dotenv
+from slack_bolt import App
+from slack_bolt.adapter.socket_mode import SocketModeHandler
+load_dotenv()
+app = App(token=os.environ.get("SLACK_BOT_TOKEN"))
+# ============================================================
+# MARKET CYCLES EDUCATION DATA
+# ============================================================
+MARKET_CYCLES = {
+    # Short-term trading cycles
+    "7": {"name": "Weekly", "reason": "Trading week cycle", "type": "✅ Standard"},
+    "14": {"name": "Bi-weekly", "reason": "Options expiry cycle", "type": "✅ Standard"},
+    "21": {"name": "Monthly Trading", "reason": "~Trading month (21 business days)", "type": "✅ Standard"},
+    "30": {"name": "Calendar Month", "reason": "Monthly reporting period", "type": "✅ Standard"},
+    # Medium-term cycles
+    "60": {"name": "Bi-monthly", "reason": "2-month trend analysis", "type": "✅ Standard"},
+    "90": {"name": "Quarterly", "reason": "Earnings cycle (Q1, Q2, Q3, Q4)", "type": "✅ Standard"},
+    "180": {"name": "Semi-Annual", "reason": "Half-year business cycle", "type": "✅ Standard"},
+    # Long-term cycles
+    "252": {"name": "Trading Year", "reason": "Full year of trading days", "type": "✅ Standard"},
+    "365": {"name": "Calendar Year", "reason": "Annual reporting cycle", "type": "✅ Standard"},
+    "730": {"name": "2 Years", "reason": "Long-term trend analysis", "type": "✅ Standard"},
+}
+ODD_TIMEFRAMES = [
+    40, 50, 70, 80, 100, 110, 120, 140, 150, 160, 170, 190,
+    200, 210, 220, 240, 260, 280, 300, 320, 340
+]
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+def analyze_timeframe(days):
+    """
+    Analyzes if the requested timeframe aligns with market cycles.
+    Returns educational message if it's an odd choice.
+    """
+    days_str = str(days)
+    # Perfect match - no education needed
+    if days_str in MARKET_CYCLES:
+        return {
+            "is_standard": True,
+            "message": None,
+            "cycle_info": MARKET_CYCLES[days_str]
+        }
+    # Odd timeframe - educate!
+    if days in ODD_TIMEFRAMES or days > 400:
+        # Find closest standard timeframe
+        closest = min(MARKET_CYCLES.keys(),
+                     key=lambda x: abs(int(x) - days))
+        cycle_info = MARKET_CYCLES[closest]
+        return {
+            "is_standard": False,
+            "requested_days": days,
+            "suggested_days": int(closest),
+            "message": f"""📚 *Market Cycle Education*
+You requested *{days} days* of analysis, which doesn't align with standard market cycles.
+🔄 *Why Market Cycles Matter:*
+• Markets move in natural rhythms (earnings, reporting, seasonality)
+• Random timeframes can create misleading patterns
+• Standard periods align with institutional analysis
+💡 *Suggested Alternative: {closest} days ({cycle_info['name']})*
+*Why?* {cycle_info['reason']}
+🎯 *Standard Market Cycles:*
+• *7 days* - Weekly trading cycle
+• *21 days* - Monthly trading cycle (~business days)
+• *30 days* - Calendar month
+• *90 days* - Quarterly (earnings reports)
+• *180 days* - Semi-annual trends
+• *252 days* - Trading year
+• *365 days* - Annual cycle
+Would you like me to analyze *{closest} days* instead?""",
+            "cycle_info": cycle_info
+        }
+    # Close enough to standard - allow but inform
+    return {
+        "is_standard": False,
+        "message": f"📊 Analyzing {days} days. Note: Standard cycles are 7, 21, 30, 90, 180, 252, or 365 days.",
+        "cycle_info": None
+    }
+def is_education_question(text):
+    """Detect if user is asking an education question vs risk analysis"""
+    education_keywords = [
+        "why", "what is", "explain", "how does", "what does", "tell me about",
+        "help me understand", "what's", "why is", "why do", "when should",
+        "difference between", "better to"
+    ]
+    return any(keyword in text.lower() for keyword in education_keywords)
+def call_risk_api(ticker, days=90):
+    """Call the Risk API for analysis"""
+    try:
+        response = requests.get(
+            "http://localhost:8081/analyze",
+            params={"ticker": ticker, "days": days},
+            timeout=10
+        )
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return None
+    except Exception as e:
+        print(f"❌ Error calling Risk API: {e}")
+        return None
+def format_risk_response(ticker, days, data):
+    """Format risk analysis into Slack blocks"""
+    risk_score = data.get("risk_score", 0)
+    risk_level = data.get("risk_level", "Unknown")
+    # Emoji mapping
+    emoji_map = {
+        "Low": "🟢",
+        "Medium": "🟡",
+        "High": "🔴",
+        "Critical": "🔴"
+    }
+    emoji = emoji_map.get(risk_level, "⚪")
+    return {
+        "text": f"Risk analysis for {ticker}",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{emoji} Risk Analysis: {ticker}*\n\n*Risk Level:* {risk_level}\n*Risk Score:* {risk_score}/100\n*Period:* {days} days"
+                }
+            }
+        ]
+    }
+# ============================================================
+# SLACK COMMAND HANDLER
+# ============================================================
+@app.command("/risk")
+def handle_risk_command(ack, command, say):
+    """Handle /risk slash command"""
+    ack()  # Acknowledge immediately
+    text = command.get("text", "").strip()
+    user = command.get("user_id")
+    print(f"📥 /risk command received: '{text}' from user {user}")
+    if not text:
+        say({
+            "text": "How to use /risk",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "💡 *How to use /risk*\n\n"
+                                "*Risk Analysis:*\n"
+                                "`/risk TICKER [DAYS]`\n"
+                                "Example: `/risk TSLA 90`\n\n"
+                                "*Market Education:*\n"
+                                "`/risk Why do 90 days matter?`\n"
+                                "`/risk What is RSI?`\n"
+                                "`/risk Explain market cycles`"
+                    }
+                }
+            ]
+        })
+        return
+    # Check if it's an education question
+    if is_education_question(text):
+        say("🤔 Let me think about that...")
+        try:
+            response = requests.post(
+                "http://localhost:8082/ask",
+                json={"question": text},
+                timeout=30
+            )
+            if response.status_code == 200:
+                data = response.json()
+                answer = data.get("answer", "I couldn't generate an answer.")
+                say({
+                    "text": "Market Education",
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"🎓 *Market Education*\n\n{answer}"
+                            }
+                        },
+                        {
+                            "type": "context",
+                            "elements": [
+                                {
+                                    "type": "mrkdwn",
+                                    "text": f"📚 Based on {data.get('context_used', 0)} knowledge sources"
+                                }
+                            ]
+                        }
+                    ]
+                })
+            else:
+                say("❌ Education service is unavailable. Make sure the RAG service is running on port 8082.")
+        except Exception as e:
+            print(f"Error calling education service: {e}")
+            say("❌ I had trouble answering that. Make sure the education service is running:\n"
+                "`python services/market_education/rag_service.py`")
+        return
+    # Parse ticker and days from command
+    parts = text.upper().split()
+    ticker = parts[0]
+    # Try to parse days (default to 90)
+    days = 90
+    if len(parts) > 1:
+        try:
+            days = int(parts[1])
+        except ValueError:
+            say(f"⚠️ Invalid days value: '{parts[1]}'. Using default 90 days.")
+            days = 90
+    print(f"   Analyzing {ticker} for {days} days")
+    # 🎓 EDUCATIONAL CHECK
+    timeframe_analysis = analyze_timeframe(days)
+    # If it's an odd timeframe, educate first!
+    if not timeframe_analysis["is_standard"] and timeframe_analysis.get("suggested_days"):
+        suggested = timeframe_analysis["suggested_days"]
+        say({
+            "text": f"Market cycle education for {days} days",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": timeframe_analysis["message"]
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": f"✅ Use {suggested} days ({timeframe_analysis['cycle_info']['name']})"
+                            },
+                            "value": f"analyze_{ticker}_{suggested}",
+                            "action_id": "use_suggested_cycle"
+                        },
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": f"Continue with {days} days"
+                            },
+                            "value": f"analyze_{ticker}_{days}",
+                            "action_id": "use_original_cycle",
+                            "style": "primary"
+                        },
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "📚 Learn More"
+                            },
+                            "value": "learn_cycles",
+                            "action_id": "learn_market_cycles"
+                        }
+                    ]
+                }
+            ]
+        })
+        return
+    # Standard timeframe - proceed with analysis
+    if timeframe_analysis.get("cycle_info"):
+        cycle_name = timeframe_analysis["cycle_info"]["name"]
+        say(f"🔍 Analyzing {ticker} over {days} days ({cycle_name} cycle)...")
+    else:
+        say(f"🔍 Analyzing {ticker} over {days} days...")
+    # Call Risk API
+    data = call_risk_api(ticker, days)
+    if data:
+        response = format_risk_response(ticker, days, data)
+        say(response)
+    else:
+        say(f"❌ Could not analyze {ticker}. Please check:\n"
+            f"• Ticker symbol is valid\n"
+            f"• Risk API is running: `python services/risk_bot_api/evito_api_server.py`")
+# ============================================================
+# BUTTON ACTION HANDLERS
+# ============================================================
+@app.action("use_suggested_cycle")
+def handle_suggested_cycle(ack, body, say):
+    """User clicked to use the suggested cycle"""
+    ack()
+    value = body["actions"][0]["value"]
+    _, ticker, days = value.split("_")
+    days = int(days)
+    cycle_info = MARKET_CYCLES.get(str(days), {})
+    cycle_name = cycle_info.get("name", "")
+    say(f"✅ Great choice! Analyzing {ticker} over {days} days ({cycle_name} cycle)...")
+    # Call Risk API
+    data = call_risk_api(ticker, days)
+    if data:
+        response = format_risk_response(ticker, days, data)
+        say(response)
+    else:
+        say(f"❌ Could not analyze {ticker}.")
+@app.action("use_original_cycle")
+def handle_original_cycle(ack, body, say):
+    """User clicked to continue with original cycle"""
+    ack()
+    value = body["actions"][0]["value"]
+    _, ticker, days = value.split("_")
+    days = int(days)
+    say(f"📊 Proceeding with {days} days analysis for {ticker}...")
+    # Call Risk API
+    data = call_risk_api(ticker, days)
+    if data:
+        response = format_risk_response(ticker, days, data)
+        say(response)
+    else:
+        say(f"❌ Could not analyze {ticker}.")
+@app.action("learn_market_cycles")
+def handle_learn_cycles(ack, say):
+    """User clicked to learn more about market cycles"""
+    ack()
+    say({
+        "text": "Market Cycles Education",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": """📚 *Understanding Market Cycles*
+🔄 *Why Cycles Matter:*
+Markets don't move randomly - they follow natural rhythms driven by:
+• 📅 Earnings reports (every 90 days)
+• 📊 Economic data releases (monthly/quarterly)
+• 💼 Institutional rebalancing (quarterly/annually)
+• 🌍 Seasonal patterns (holidays, tax seasons)
+⚠️ *The Problem with Random Timeframes:*
+Using periods like 80 days or 143 days can:
+• Create false patterns that don't repeat
+• Miss key cycle boundaries (earnings releases)
+• Misalign with institutional analysis windows
+• Lead to incorrect conclusions
+✅ *Standard Cycles to Use:*
+*Short-term (Trading):*
+• 7 days - Weekly cycle
+• 21 days - Trading month
+• 30 days - Calendar month
+*Medium-term (Business):*
+• 90 days - Quarterly earnings
+• 180 days - Semi-annual trends
+*Long-term (Strategic):*
+• 252 days - Trading year
+• 365 days - Calendar year
+• 730 days - 2-year trend
+💡 *Pro Tip:* When in doubt, use 90 days (quarterly cycle) - it aligns with earnings reports and captures meaningful trends!
+Want to learn more? Ask me: `/risk Why do 90 days matter?`"""
+                }
+            }
+        ]
+    })
+# ============================================================
+# REGULAR MESSAGE HANDLER (OPTIONAL)
+# ============================================================
+@app.event("message")
+def handle_message(event, say):
+    """Handle regular messages (optional - if you want the bot to respond to chat)"""
+    text = event.get("text", "")
+    # Ignore bot messages
+    if event.get("bot_id"):
+        return
+    print(f"📥 Message received: '{text}'")
+    # You can add logic here if you want the bot to respond to regular chat
+    # For now, we'll just use slash commands
+# ============================================================
+# START THE BOT
+# ============================================================
+if __name__ == "__main__":
+    handler = SocketModeHandler(app, os.environ.get("SLACK_APP_TOKEN"))
+    print("\n" + "="*60)
+    print("⚡️ EVITO Slack Bot is running!")
+    print("="*60)
+    print("\n💡 Usage:")
+    print("  /risk TSLA           - Analyze TSLA with 90-day cycle")
+    print("  /risk AAPL 180       - Analyze AAPL with 180-day cycle")
+    print("  /risk NVDA 80        - Get cycle education for 80 days")
+    print("  /risk Why 90 days?   - Ask education questions")
+    print("\n" + "="*60 + "\n")
+    handler.start()
+

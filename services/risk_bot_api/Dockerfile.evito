@@ -1,0 +1,18 @@
+FROM python:3.11-slim
+WORKDIR /app
+
+# Copy requirements and install (expects build context at repo root)
+COPY services/risk_bot_api/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy API server and dependencies
+COPY services/risk_bot_api/evito_api_server.py .
+COPY services/risk/enhanced_risk_bot.py ./enhanced_risk_bot.py
+COPY services/shared/education.py ./education.py
+
+EXPOSE 8081
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD python -c "import requests; requests.get('http://localhost:8081/health')"
+
+CMD ["python", "evito_api_server.py"]

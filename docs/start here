@@ -1,0 +1,170 @@
+Context / constraints (IMPORTANT – DO NOT VIOLATE):
+
+- Project root: ~/EVITO
+- Streamlit app entrypoint: services/streamlit_app/app.py
+- Existing globals there:
+  - PERSONAS = {...}
+  - SLACK_BROADCAST_WEBHOOK = os.getenv("SLACK_BROADCAST_WEBHOOK")
+  - call_api(ticker, days), risk_bar(...), fetch_news(...), etc.
+- I am running this inside a working venv with OpenAI and Streamlit already installed.
+- DO NOT change my environment, venv, pip, uv, or OpenAI SDK version.
+- Focus ONLY on:
+  - app logic
+  - lightweight data storage (files / JSONL)
+  - UI components
+  - Slack integration using the existing webhook env var.
+
+High-level goal:
+
+I want a simple “1 chat per brief” system inside the EVITO app, plus Slack integration that helps me send things out with one click.
+
+Concept:
+
+- A "brief" is an investment case (e.g. “Strøm er den nye oljen”, “Samsung & AI-boomen”, etc.).
+- For each brief, there should be a dedicated chat thread where an agent (persona) can reason about that brief.
+- The system should NOT be emotional: agents act like auditors / analysts, not hype-machines.
+- Later, I want to use Slack as a control panel: from the brief/chat view, I want suggestions like:
+  - “Send siste melding til Slack”
+  - “Send Audit Agent-konklusjon til Slack”
+  - “Send sammendrag av dialogen til Slack”
+
+Phase 1: Data model (simple, file-based)
+
+1. Create a tiny “store” module for briefs and chats. You can put it in:
+   services/streamlit_app/brief_chat_store.py
+   or similar, as long as imports are clean.
+
+2. Brief model (Python dict / dataclass is fine):
+   - id: str           # e.g. "POWER_AI_HEDGE", "SAMSUNG_AI"
+   - title: str
+   - ticker: str | None
+   - thesis: str       # main brief body text
+   - created_at: str (ISO timestamp)
+   - optional fields like risks: list[str], support: list[str]
+
+   Storage can be:
+   - data/briefs.jsonl or data/briefs.json
+   - simple load/save helpers:
+     - list_briefs() -> list[Brief]
+     - get_brief(brief_id) -> Brief | None
+     - upsert_brief(brief: dict)
+
+3. Chat model per brief:
+   - chat_id: str              # e.g. f"{brief_id}__default"
+   - brief_id: str
+   - agent: str                # e.g. "Audit Agent", "Buffett", "Tech Strategist"
+   - messages: list[{"role": "system"|"user"|"assistant", "content": str}]
+   - updated_at: str (ISO timestamp)
+
+   Store this in:
+   - data/chats.jsonl or data/chats.json
+
+   Provide helpers:
+   - get_or_create_chat(brief_id: str, agent: str) -> chat dict
+   - append_message(chat_id, role, content) -> updated chat
+   - get_last_message(chat_id) -> last assistant/user message or None
+
+Phase 2: Streamlit UI integration
+
+4. In services/streamlit_app/app.py, add a simple “Briefs” / “AI Debate” section that:
+
+   - Lists available briefs (for now, it’s OK to hardcode or read from a small JSON file).
+   - For each brief:
+     - Show title and a preview of the thesis.
+     - A button: “Open chat for this brief”.
+
+   When a brief is selected:
+   - Show the full brief text at the top.
+   - Let me pick an agent/persona from a selectbox:
+     - Use existing PERSONAS keys (Buffett, Risk Officer, Tech Strategist)
+     - PLUS at least one dedicated “Audit Agent” persona with this system prompt idea:
+       - “You are an Audit Agent. Your job is to make sure the thesis is never stronger than the theories and data it is built on. You flag confirmation bias, emotional reasoning, and unsupported extrapolations. You distinguish between supported, inferred, and speculative claims.”
+
+   - Under the brief, show a basic chat interface:
+     - A text_area for my question/input.
+     - A button: “Send to agent”.
+     - On click:
+       - Append my message to the chat history for that brief.
+       - Call the LLM (you can just stub a call_model(agent, brief, history, user_input) function – I can wire the actual API later).
+       - Append the assistant’s reply.
+       - Render the full conversation (or the last N messages) in the UI.
+
+   For now, the model call can be mocked with a placeholder like:
+   - “This is a demo response from {agent} about brief {brief_id}.”
+   I just want the structure; I’ll integrate the real AI calls myself.
+
+Phase 3: Slack suggestion panel
+
+5. Use the existing SLACK_BROADCAST_WEBHOOK env var. Add a helper in app.py (or a small utils file):
+
+   def send_to_slack(title: str, body: str) -> bool:
+       """
+       Sends a formatted message to Slack using SLACK_BROADCAST_WEBHOOK.
+       """
+       if not SLACK_BROADCAST_WEBHOOK:
+           return False
+       try:
+           resp = requests.post(
+               SLACK_BROADCAST_WEBHOOK,
+               json={"text": f"*{title}*\n{body}"},
+               timeout=5,
+           )
+           resp.raise_for_status()
+           return True
+       except Exception as e:
+           print("Slack error:", e)
+           return False
+
+6. Under the chat UI for a brief, add a “Slack suggestions” block:
+
+   - Three checkboxes:
+     - [ ] Send last assistant message to Slack
+     - [ ] Send “Audit Agent conclusion” to Slack
+     - [ ] Send a compressed summary of the dialog to Slack
+
+   - One button:
+     - “📤 Execute Slack suggestions”
+
+   Logic (you can stub some parts):
+
+   - last_message_text:
+     - use get_last_message(chat_id) where role == "assistant"
+
+   - audit_summary_text:
+     - for now, you can simulate this by:
+       - taking the last assistant message from the “Audit Agent” chat for that brief
+       - or a placeholder like: “(Demo) Audit Agent: This is where the conclusion would go.”
+
+   - compressed_summary_text:
+     - simple heuristic is fine:
+       - join the last N messages and truncate to ~800 characters
+       - or “(Demo) Summary of dialog for brief {brief_id}.”
+
+   - When the button is clicked:
+     - For each checked box:
+       - call send_to_slack() with an appropriate title and body
+     - Show success/error via st.success / st.error.
+
+UX notes:
+
+- I want this to feel like:
+  - “System foreslår hva som kan sendes”
+  - “Jeg velger hva som faktisk sendes”
+- This is for a demo: mock data and stubbed AI calls are fine as long as the flow and structure are clear.
+
+Deliverables:
+
+- New/modified files:
+  - services/streamlit_app/brief_chat_store.py  (or similar) for persistence.
+  - services/streamlit_app/app.py updated with:
+    - brief list
+    - per-brief chat UI
+    - agent selection
+    - Slack suggestion panel
+
+- The code must run without changing my env. Any AI calls can be stubbed with simple strings or TODOs.
+
+Please:
+- Show me the diff or code snippets for each file you change.
+- Keep everything as simple and explicit as possible; no over-engineering.
+
